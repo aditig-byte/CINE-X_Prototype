@@ -1,0 +1,95 @@
+CINE-X FORENSIC CASE RECORD
+======================================================================
+
+Case ID:
+    CINE-X-20260902-131704
+
+Generated:
+    2026-09-02 13:17:04
+
+System:
+    CINE-X
+
+System Description:
+    CCTV Forensic Recovery System
+
+Evidence:
+    cam1_damaged.mp4
+
+Evidence Size:
+    13,333,450 bytes
+
+Evidence SHA-256:
+    e1aad3d6f4542ec304ad16582ba0b104ac2048b73843e3764f84b43dc617b688
+
+Analysis Format:
+    H.264 Elementary Stream
+
+H.264 NAL Units:
+    850
+
+IDR Frames:
+    4
+
+P-Frames:
+    837
+
+SPS:
+    4
+
+PPS:
+    4
+
+SEI:
+    1
+
+Corruption:
+    DETECTED
+
+Damage Start:
+    6085197
+
+Damage End:
+    6085296
+
+Damaged Bytes:
+    100
+
+Affected NAL:
+    367
+
+NAL Type:
+    1
+
+Affected Macroblock:
+    X=91
+    Y=40
+
+Previous IDR:
+    4012886
+
+Recovery Anchor:
+    8157508
+
+Recovery Anchor Type:
+    IDR / Intra-coded picture
+
+Recovery Status:
+    SUCCESSFUL
+
+Playback Reconstruction:
+    SUCCESSFUL
+
+Recovery Verification:
+    PASSED
+
+Case Integrity:
+    PENDING SHA-256 MANIFEST VERIFICATION
+
+NOTE:
+    SHA256_MANIFEST.txt intentionally excludes itself from
+    the manifest because self-hashing creates a circular
+    dependency. Case integrity is verified against the
+    hashes recorded inside the manifest.
+
+======================================================================

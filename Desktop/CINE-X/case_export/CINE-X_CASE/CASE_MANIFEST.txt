@@ -1,0 +1,40 @@
+======================================================================
+                         CINE-X
+                 FORENSIC CASE MANIFEST
+======================================================================
+
+Export time:
+    2026-09-01 20:22:21
+
+Case contents:
+
+CASE_MANIFEST.txt
+    Size: 0 bytes
+
+evidence\15396171_1920_1080_25fps.mp4
+    Size: 6,174,025 bytes
+
+evidence\15396212_1920_1080_25fps.mp4
+    Size: 13,337,392 bytes
+
+evidence\cam1.h264
+    Size: 13,328,980 bytes
+
+evidence\cam1_damaged.h264
+    Size: 13,328,980 bytes
+
+evidence\cam1_damaged.mp4
+    Size: 13,333,450 bytes
+
+recovered\cine_x_recovered.h264
+    Size: 5,171,516 bytes
+
+recovered\cine_x_recovered.mp4
+    Size: 5,173,848 bytes
+
+reports\CINE-X_Forensic_Report.txt
+    Size: 5,236 bytes
+
+======================================================================
+CINE-X CASE PACKAGE COMPLETE
+======================================================================

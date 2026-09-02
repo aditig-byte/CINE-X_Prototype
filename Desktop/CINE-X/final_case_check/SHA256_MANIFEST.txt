@@ -1,0 +1,7 @@
+CINE-X SHA-256 EVIDENCE MANIFEST
+======================================================================
+
+e1aad3d6f4542ec304ad16582ba0b104ac2048b73843e3764f84b43dc617b688  evidence\cam1_damaged.mp4
+fee5eae2c401140f19f2b54a223567c6e18cd5a3dd9e12c32741873b466b46a6  recovered\cine_x_recovered.h264
+74bb06300a560689a884cb49effee142c3dd6c87dfc533d6d242a4ed01dd606f  recovered\cine_x_recovered.mp4
+74bb06300a560689a884cb49effee142c3dd6c87dfc533d6d242a4ed01dd606f  recovered\cine_x_recovered_fixed.mp4

@@ -1,0 +1,58 @@
+{
+    "case_id": "CINE-X-20260901-202023",
+    "generated_at": "2026-09-01 20:20:23",
+    "system": "CINE-X CCTV Forensic Recovery System",
+    "evidence": {
+        "status": "ANALYZED",
+        "analysis_format": "H.264 Elementary Stream",
+        "files": [
+            "cam1_damaged.h264",
+            "cam1_damaged.mp4"
+        ]
+    },
+    "h264_structure": {
+        "nal_units": 850,
+        "idr_frames": 4,
+        "p_frames": 837,
+        "sps": 4,
+        "pps": 4,
+        "sei": 1
+    },
+    "corruption": {
+        "status": "CORRUPTION DETECTED",
+        "damage_start": 6085197,
+        "damage_end": 6085296,
+        "damaged_bytes": 100,
+        "affected_macroblock": {
+            "x": 91,
+            "y": 40
+        },
+        "affected_nal": {
+            "number": 367,
+            "type": 1,
+            "start": 6061687,
+            "end": 6092388,
+            "size": 30701
+        }
+    },
+    "recovery": {
+        "previous_idr": 4012886,
+        "selected_anchor": 8157508,
+        "anchor_type": "IDR / Intra-coded picture",
+        "selection_method": "First valid IDR after corrupted region",
+        "status": "COMPLETED"
+    },
+    "verification": {
+        "status": "PASSED",
+        "resolution": "1920x1080",
+        "frame_rate": "25 FPS",
+        "duration": "00:00:13.56",
+        "decoder_errors": 0
+    },
+    "outputs": {
+        "recovered_h264": "cine_x_recovered.h264",
+        "recovered_mp4": "cine_x_recovered.mp4",
+        "forensic_report": "CINE-X_Forensic_Report.txt"
+    },
+    "overall_status": "SUCCESSFUL"
+}

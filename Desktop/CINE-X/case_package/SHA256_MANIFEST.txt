@@ -1,0 +1,53 @@
+CINE-X SHA-256 INTEGRITY MANIFEST
+========================================
+
+Case ID: CINE-X-20260902-131704
+Created: 2026-09-02 13:17:04
+
+File: analysis/h264_analysis.json
+Size: 287 bytes
+SHA-256: 2b7ca5c9c31ec4c940e50992436f2693f29d0a354347c8d949311f450cc89d6e
+
+File: analysis/prepared_evidence.h264
+Size: 13,328,980 bytes
+SHA-256: 1d4080aab3624ef2b69785ee95d38fae4207dcc8d7e43e971e21dc85285119b2
+
+File: CASE_RECORD.txt
+Size: 1,394 bytes
+SHA-256: 852dbecf7bb631025566f85e699cd55e6af3e5f6b0ec33bacb1d1ca334e9f58f
+
+File: case_summary.json
+Size: 2,586 bytes
+SHA-256: 120f12964ff0656c8bbae9ca12843ef844822dc80cd378392cdf16577bd436fe
+
+File: evidence/cam1_damaged.mp4
+Size: 13,333,450 bytes
+SHA-256: e1aad3d6f4542ec304ad16582ba0b104ac2048b73843e3764f84b43dc617b688
+
+File: recovered/cine_x_recovered.h264
+Size: 5,171,516 bytes
+SHA-256: fee5eae2c401140f19f2b54a223567c6e18cd5a3dd9e12c32741873b466b46a6
+
+File: recovered/cine_x_recovered.mp4
+Size: 5,173,848 bytes
+SHA-256: 0676010b1c77b30b23646f80e66fd4fb3402daef39627d48e4b3aacab1a1d8fd
+
+File: recovered/cine_x_recovered_fixed.mp4
+Size: 5,173,848 bytes
+SHA-256: 0676010b1c77b30b23646f80e66fd4fb3402daef39627d48e4b3aacab1a1d8fd
+
+File: reports/CINE-X_Forensic_Report.txt
+Size: 6,546 bytes
+SHA-256: 2c9e0aa9c11144192867c494fc18e3b685fb5e4e21ddf4fb893386d270a2c163
+
+File: reports/decoder_validation.log
+Size: 1,685 bytes
+SHA-256: a7b1da4b3df0cc42d59fd542d64bf18fdd8dcdbcdf3d66c93c53cee1064f70ed
+
+File: reports/localization.json
+Size: 289 bytes
+SHA-256: 23ad56de103934cc185b6aa78a016a663068fadb4a7e01cba3a72f7b6dfcb3f3
+
+File: reports/recovery_metadata.json
+Size: 359 bytes
+SHA-256: d28b78ba07315215ed95a1d1161887430c27d8c6795de82ad0a9ff420f554375

@@ -1,0 +1,237 @@
+======================================================================
+                         CINE-X
+              CCTV FORENSIC RECOVERY SYSTEM
+======================================================================
+
+FORENSIC RECOVERY REPORT
+======================================================================
+
+Report generated: 2026-09-01 20:18:23
+
+----------------------------------------------------------------------
+1. EVIDENCE INFORMATION
+----------------------------------------------------------------------
+
+Evidence filename:
+    cam1_damaged.mp4
+
+Original evidence size:
+    13,333,450 bytes
+
+Analysis representation:
+    H.264 Elementary Stream
+
+Evidence status:
+    ANALYZED
+
+
+----------------------------------------------------------------------
+2. H.264 STRUCTURAL ANALYSIS
+----------------------------------------------------------------------
+
+NAL units detected:
+    850
+
+IDR frames:
+    4
+
+P-frames:
+    837
+
+SPS units:
+    4
+
+PPS units:
+    4
+
+SEI units:
+    1
+
+Structural assessment:
+    Recoverable H.264 structures detected.
+
+
+----------------------------------------------------------------------
+3. CORRUPTION DETECTION
+----------------------------------------------------------------------
+
+Corruption status:
+    CORRUPTION DETECTED
+
+Decoder evidence:
+
+    [h264 @ 0000014a4b74ac80] Reference 6 >= 5
+
+    [h264 @ 0000014a4b74ac80] error while decoding MB 91 40, bytestream 6472
+
+    [h264 @ 0000014a4b74ac80] concealing 3318 DC, 3318 AC, 3318 MV errors in P frame
+
+    [vist#0:0/h264 @ 0000014a49463d80] [dec:h264 @ 0000014a49463f40] corrupt decoded frame
+
+
+----------------------------------------------------------------------
+4. DAMAGE LOCALIZATION
+----------------------------------------------------------------------
+
+Affected macroblock:
+
+    X coordinate: 91
+    Y coordinate: 40
+
+Affected NAL unit:
+
+    NAL number: 367
+    NAL type: 1 (P-frame / Non-IDR picture)
+
+NAL boundaries:
+
+    Start byte: 6,061,687
+    End byte:   6,092,388
+    Size:       30,701 bytes
+
+Controlled damage region:
+
+    Damage start: 6,085,197
+    Damage end:   6,085,296
+    Damaged bytes: 100
+
+Damage localization status:
+
+    LOCALIZED
+
+
+----------------------------------------------------------------------
+5. RECOVERY ANCHOR SELECTION
+----------------------------------------------------------------------
+
+Previous IDR:
+
+    Byte offset: 4,012,886
+
+Selected recovery anchor:
+
+    Byte offset: 8,157,508
+
+Recovery anchor type:
+
+    IDR / Intra-coded picture
+
+Selection logic:
+
+    The first valid IDR frame after the corrupted region
+    was selected as the recovery anchor.
+
+Recovery confidence:
+
+    HIGH
+
+
+----------------------------------------------------------------------
+6. AUTOMATIC FOOTAGE RECOVERY
+----------------------------------------------------------------------
+
+Recovery method:
+
+    Selected the first valid IDR frame after the corrupted
+    region and reconstructed the H.264 stream from that
+    recovery anchor.
+
+Recovered H.264:
+
+    C:\Users\Aditi Gupta\Desktop\CINE-X\recovered\cine_x_recovered.h264
+
+Recovered H.264 size:
+
+    5,171,516 bytes
+
+Recovered MP4:
+
+    C:\Users\Aditi Gupta\Desktop\CINE-X\recovered\cine_x_recovered.mp4
+
+Recovered MP4 size:
+
+    5,173,848 bytes
+
+Recovery status:
+
+    COMPLETED
+
+
+----------------------------------------------------------------------
+7. RECOVERY VERIFICATION
+----------------------------------------------------------------------
+
+Recovered video:
+
+    C:\Users\Aditi Gupta\Desktop\CINE-X\recovered\cine_x_recovered.mp4
+
+Resolution:
+
+    1920x1080
+
+Frame rate:
+
+    25 FPS
+
+Duration:
+
+    00:00:13.56
+
+Decoder validation:
+
+    FFmpeg successfully decoded the recovered footage.
+
+Corruption-related decoder errors:
+
+    0
+
+Verification status:
+
+    PASSED
+
+
+----------------------------------------------------------------------
+8. FORENSIC CONCLUSION
+----------------------------------------------------------------------
+
+CINE-X successfully analyzed the damaged CCTV footage and
+identified corruption within a P-frame.
+
+The damaged region was localized using H.264 NAL structure
+and decoder evidence.
+
+A valid IDR frame located after the corrupted region was
+automatically selected as the recovery anchor.
+
+The footage was reconstructed from the clean recovery point
+and successfully converted into a playable MP4 file.
+
+The recovered footage passed decoder validation without
+corruption-related decoder errors.
+
+Overall recovery status:
+
+    SUCCESSFUL
+
+
+======================================================================
+                    CINE-X PIPELINE COMPLETE
+======================================================================
+
+Evidence
+    ↓
+H.264 Structural Analysis
+    ↓
+Corruption Detection
+    ↓
+Damage Localization
+    ↓
+IDR Recovery
+    ↓
+Recovery Verification
+    ↓
+Forensic Report
+
+======================================================================
+                         END OF REPORT
+======================================================================
