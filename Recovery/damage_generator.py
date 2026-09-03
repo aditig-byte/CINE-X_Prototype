@@ -2,9 +2,9 @@ from pathlib import Path
 import json
 
 
-INPUT_FILE = Path("../Data/Original/cam01.h264")
-OUTPUT_FILE = Path("../Data/Damaged/cam01_severely_damaged.h264")
-REPORT_FILE = Path("../Data/Damaged/severe_damage_report.json")
+INPUT_FILE = Path("Data/Original/cam01.h264")
+OUTPUT_FILE = Path("Data/Damaged/cam01_severely_damaged.h264")
+REPORT_FILE = Path("Data/Damaged/severe_damage_report.json")
 
 START_NAL = 100
 NUMBER_OF_NALS = 20

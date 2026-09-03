@@ -1,3 +1,0 @@
-ffconcat version 1.0
-file 'C:/Users/Aditi Gupta/Desktop/CINE-X/temp/good_before_damage.mp4'
-file 'C:/Users/Aditi Gupta/Desktop/CINE-X/recovered/cine_x_recovered_fixed.mp4'

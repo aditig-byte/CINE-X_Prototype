@@ -1,9 +1,0 @@
-{
-    "original_file": "..\\Data\\Original\\cam01.h264",
-    "damaged_file": "..\\Data\\Damaged\\cam01_damaged.h264",
-    "target_nal": 100,
-    "nal_type": 1,
-    "damage_start": 1784884,
-    "damage_end": 1785884,
-    "damage_size": 1000
-}

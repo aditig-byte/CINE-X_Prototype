@@ -1,0 +1,42 @@
+# Python virtual environment
+.venv/
+venv/
+env/
+ENV/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Data & Export Files
+*.zip
+*.h264
+Data/Damaged/
+Data/Original/
+Data/Recovered/
+case_export/
+exports/
+Desktop/
+
+# IDE & Environment files
+.vscode/
+.idea/
+.env
+*.log

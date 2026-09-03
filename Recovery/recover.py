@@ -1,8 +1,8 @@
 from pathlib import Path
 
 
-INPUT_FILE = Path("../Data/Damaged/cam01_severely_damaged.h264")
-OUTPUT_FILE = Path("../Data/Recovered/cam01_recovered.h264")
+INPUT_FILE = Path("Data/Damaged/cam01_severely_damaged.h264")
+OUTPUT_FILE = Path("Data/Recovered/cam01_recovered.h264")
 
 
 def find_nals(data):
