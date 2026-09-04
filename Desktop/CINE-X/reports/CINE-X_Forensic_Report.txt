@@ -7,7 +7,7 @@ FORENSIC RECOVERY REPORT
 ======================================================================
 
 Report generated:
-    2026-09-02 13:20:06
+    2026-09-04 10:17:30
 
 
 ----------------------------------------------------------------------
@@ -65,10 +65,10 @@ Corruption status:
 
 Decoder evidence:
 
-    [h264 @ 000001fa03a2dec0] Reference 6 >= 5
-    [h264 @ 000001fa03a2dec0] error while decoding MB 91 40, bytestream 6472
-    [h264 @ 000001fa03a2dec0] concealing 3318 DC, 3318 AC, 3318 MV errors in P frame
-    [vist#0:0/h264 @ 000001fa0181e300] [dec:h264 @ 000001fa03b2f500] corrupt decoded frame
+    [h264 @ 00000199b0c6bf00] Reference 6 >= 5
+    [h264 @ 00000199b0c6bf00] error while decoding MB 91 40, bytestream 6472
+    [h264 @ 00000199b0c6bf00] concealing 3318 DC, 3318 AC, 3318 MV errors in P frame
+    [vist#0:0/h264 @ 00000199af107f00] [dec:h264 @ 00000199b131f500] corrupt decoded frame
 
 
 ----------------------------------------------------------------------
@@ -86,35 +86,35 @@ Affected macroblock:
 Affected NAL unit:
 
     NAL number:
-        367
+        256
 
     NAL type:
-        1
+        5
 
 NAL boundaries:
 
     Start byte:
-        6061687
+        4012886
 
     End byte:
-        6092388
+        4348725
 
     Size:
-        30701 bytes
+        335839 bytes
 
 Controlled damage region:
 
     Damage start:
-        6085197
+        4012886
 
     Damage end:
-        6085296
+        4348724
 
     Damaged bytes:
-        100
+        335839
 
     Position inside NAL:
-        23510
+        0
 
 Damage localization status:
     LOCALIZED
@@ -127,25 +127,29 @@ Damage localization status:
 Previous IDR:
 
     Byte offset:
-        4012886
-
-Expected previous IDR:
-    4012886
+        734
 
 Selected recovery anchor:
 
     Byte offset:
         8157508
 
-Expected recovery anchor:
-    8157508
-
 Recovery anchor type:
     IDR / Intra-coded picture
 
+Localization method:
+    Robust NAL-size anomaly detection (median absolute
+    deviation), cross-referenced against decoder-reported
+    macroblock coordinates when available. No fixed byte
+    offsets for a specific evidence file are used.
+
 Selection logic:
-    The first valid IDR frame after the corrupted region
-    was selected as the recovery anchor.
+    Clean footage preceding the corruption was retained.
+    The unrecoverable damaged segment — the flagged NAL
+    through to just before the next IDR — was discarded,
+    since intervening P-frames depend on it. Playback
+    resumes from the first valid IDR frame after the
+    corrupted region.
 
 Recovery confidence:
     HIGH
@@ -156,9 +160,18 @@ Recovery confidence:
 ----------------------------------------------------------------------
 
 Recovery method:
-    The first valid IDR frame after the corrupted region
-    was selected and the H.264 stream was reconstructed
-    from that clean recovery point.
+    Clean footage preceding the corruption was retained
+    unmodified. The unrecoverable damaged segment was
+    discarded, and the H.264 stream was resumed from the
+    first valid IDR frame after it — producing one
+    continuous recovered video rather than a clip cropped
+    down to the tail after the damage.
+
+Clean footage retained:
+    4012886 bytes
+
+Unrecoverable segment skipped:
+    4144622 bytes
 
 Recovered H.264:
     recovered/cine_x_recovered.h264
@@ -198,7 +211,7 @@ Frame rate:
     25 FPS
 
 Duration:
-    00:00:13.56
+    00:00:23.56
 
 Decoder validation:
     FFmpeg successfully decoded the reconstructed

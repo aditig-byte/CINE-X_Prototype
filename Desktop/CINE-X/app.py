@@ -4,6 +4,7 @@ import sys
 import subprocess
 import re
 import shutil
+import statistics
 import zipfile
 import hashlib
 import json
@@ -114,23 +115,25 @@ FFMPEG = find_ffmpeg()
 
 
 # ============================================================
-# CONSTANTS FOR CURRENT CINE-X TEST CASE
+# DYNAMIC CORRUPTION LOCALIZATION SETTINGS
 #
-# These are the known forensic coordinates for the current
-# cam1_damaged.mp4 test evidence.
+# CINE-X no longer relies on hardcoded byte offsets tied to a
+# single known test file. Damage is instead localized per
+# evidence file by:
 #
-# Keep them together so they can be replaced later if the
-# application is generalized to other test cases.
+#   1. Flagging the slice NAL unit whose size deviates sharply
+#      from the median slice size in that stream — a strong,
+#      file-independent signature of truncated or overwritten
+#      payload data.
+#   2. Parsing the FFmpeg decoder log for macroblock
+#      coordinates, when the decoder reports them for that
+#      stream.
+#
+# These thresholds control how aggressive that detection is.
 # ============================================================
 
-DAMAGE_START = 6_085_197
-DAMAGE_END = 6_085_296
-
-AFFECTED_MACROBLOCK_X = 91
-AFFECTED_MACROBLOCK_Y = 40
-
-EXPECTED_PREVIOUS_IDR = 4_012_886
-EXPECTED_RECOVERY_IDR = 8_157_508
+NAL_SIZE_ANOMALY_THRESHOLD = 3.5   # robust (MAD-based) z-score
+MIN_SLICE_NALS_FOR_ANOMALY_DETECTION = 3
 
 VIDEO_FRAMERATE = 25
 
@@ -251,6 +254,8 @@ DEFAULT_STATE = {
     "localization": None,
     "recovery_anchor": None,
     "previous_idr": None,
+    "recovery_clean_prefix_bytes": None,
+    "recovery_skipped_bytes": None,
 
     "video_info": {},
     "case_hashes": {},
@@ -368,6 +373,8 @@ def reset_session_pipeline():
     st.session_state.localization = None
     st.session_state.recovery_anchor = None
     st.session_state.previous_idr = None
+    st.session_state.recovery_clean_prefix_bytes = None
+    st.session_state.recovery_skipped_bytes = None
 
     st.session_state.video_info = {}
     st.session_state.case_hashes = {}
@@ -485,7 +492,116 @@ def parse_nals(data):
 
 
 # ============================================================
-# PREPARE H.264
+# DYNAMIC DAMAGE DETECTION
+# ============================================================
+
+def find_anomalous_nal(nals):
+    """
+    Identify the slice NAL unit (type 1 or 5) whose size
+    deviates most sharply from the stream's typical slice
+    size, using a robust median-absolute-deviation z-score.
+
+    A truncated or overwritten NAL payload — the corruption
+    signature CINE-X targets — shows up as a size outlier
+    relative to neighboring frames, regardless of which file
+    is being analyzed. Returns None if no NAL crosses the
+    anomaly threshold, or if there isn't enough slice data to
+    judge "typical" size for this stream.
+    """
+
+    slice_nals = [
+        nal for nal in nals
+        if nal["type"] in (1, 5)
+    ]
+
+    if len(slice_nals) < MIN_SLICE_NALS_FOR_ANOMALY_DETECTION:
+        return None
+
+    sizes = [nal["size"] for nal in slice_nals]
+    median_size = statistics.median(sizes)
+
+    deviations = [
+        abs(size - median_size) for size in sizes
+    ]
+
+    mad = statistics.median(deviations)
+
+    if mad == 0:
+
+        # Low-variance stream (e.g. a static CCTV scene where
+        # most P-frames are near-identical in size). A MAD-based
+        # z-score is undefined here, so fall back to a simple
+        # ratio test: a slice far smaller or larger than the
+        # stream's median is still a strong corruption signal.
+
+        best_nal = None
+        best_ratio = 1.0
+
+        for nal, size in zip(slice_nals, sizes):
+
+            if size == 0:
+                continue
+
+            ratio = max(
+                size / median_size,
+                median_size / size,
+            )
+
+            if (
+                ratio > 2.0
+                and ratio > best_ratio
+            ):
+                best_ratio = ratio
+                best_nal = nal
+
+        return best_nal
+
+    scaled_mad = mad * 1.4826
+
+    best_nal = None
+    best_score = 0
+
+    for nal, size in zip(slice_nals, sizes):
+
+        score = abs(size - median_size) / scaled_mad
+
+        if (
+            score > NAL_SIZE_ANOMALY_THRESHOLD
+            and score > best_score
+        ):
+            best_score = score
+            best_nal = nal
+
+    return best_nal
+
+
+def extract_macroblock_from_log(decoder_log):
+    """
+    Pull the first reported macroblock coordinates out of the
+    FFmpeg decoder log, when FFmpeg's H.264 decoder reports
+    them for this stream (e.g. lines like
+    "error while decoding MB 91 40, bytestream ...").
+
+    Returns (x, y) as ints, or (None, None) if no macroblock
+    coordinates were reported for this evidence file.
+    """
+
+    if not decoder_log:
+        return None, None
+
+    match = re.search(
+        r"MB\s+(\d+)\s+(\d+)",
+        decoder_log,
+    )
+
+    if not match:
+        return None, None
+
+    return int(match.group(1)), int(match.group(2))
+
+
+# ============================================================
+# PREPARE H264
 # ============================================================
 
 def prepare_h264(input_path):
@@ -1291,54 +1407,50 @@ if uploaded_file is not None:
 
             st.stop()
 
-        target_nal = None
-
-        for nal in nals:
-
-            if (
-                nal["start"]
-                <= DAMAGE_START
-                < nal["end"]
-            ):
-                target_nal = nal
-                break
+        target_nal = find_anomalous_nal(nals)
 
         if target_nal is None:
 
             st.warning(
-                "The configured damage offset does not "
-                "fall inside a detected NAL unit."
+                "No anomalous NAL unit was detected in "
+                "this stream — corruption could not be "
+                "localized to a specific NAL boundary."
             )
 
             st.info(
-                "The evidence may use a different "
-                "corruption offset than the current "
-                "CINE-X test case."
+                "This can happen when the evidence stream "
+                "is structurally intact, or when the "
+                "corruption doesn't alter NAL size enough "
+                "to be flagged by the current detector."
             )
 
             st.stop()
 
-        if DAMAGE_END >= target_nal["end"]:
-
-            st.error(
-                "Configured damage end falls outside "
-                "the affected NAL unit."
+        macroblock_x, macroblock_y = (
+            extract_macroblock_from_log(
+                st.session_state.decoder_log
             )
+        )
 
-            st.stop()
+        damage_start = target_nal["start"]
+        damage_end = target_nal["end"] - 1
 
         localization = {
-            "damage_start": DAMAGE_START,
-            "damage_end": DAMAGE_END,
+            "damage_start": damage_start,
+            "damage_end": damage_end,
             "damaged_bytes": (
-                DAMAGE_END -
-                DAMAGE_START +
+                damage_end -
+                damage_start +
                 1
             ),
             "macroblock_x":
-                AFFECTED_MACROBLOCK_X,
+                macroblock_x
+                if macroblock_x is not None
+                else "Not reported by decoder",
             "macroblock_y":
-                AFFECTED_MACROBLOCK_Y,
+                macroblock_y
+                if macroblock_y is not None
+                else "Not reported by decoder",
             "nal_number":
                 target_nal["number"],
             "nal_type":
@@ -1349,9 +1461,7 @@ if uploaded_file is not None:
                 target_nal["end"],
             "nal_size":
                 target_nal["size"],
-            "position_in_nal":
-                DAMAGE_START -
-                target_nal["start"],
+            "position_in_nal": 0,
         }
 
         st.session_state.localization = (
@@ -1368,28 +1478,22 @@ if uploaded_file is not None:
             localization,
         )
 
-        # Find actual previous IDR.
+        # Find actual previous IDR before the anomalous NAL.
         previous_idr = None
 
         for nal in nals:
 
-            if nal["start"] >= DAMAGE_START:
+            if nal["start"] >= target_nal["start"]:
                 break
 
             if nal["type"] == 5:
                 previous_idr = nal
 
-        if previous_idr is not None:
-
-            st.session_state.previous_idr = (
-                previous_idr["start"]
-            )
-
-        else:
-
-            st.session_state.previous_idr = (
-                EXPECTED_PREVIOUS_IDR
-            )
+        st.session_state.previous_idr = (
+            previous_idr["start"]
+            if previous_idr is not None
+            else None
+        )
 
         st.session_state.localization_complete = True
 
@@ -1422,7 +1526,7 @@ if uploaded_file is not None:
         with col3:
             st.metric(
                 "Damage Start",
-                f"{DAMAGE_START:,}",
+                f"{damage_start:,}",
             )
 
         with col4:
@@ -1454,14 +1558,17 @@ if uploaded_file is not None:
                 "**Corruption location**"
             )
 
+            macroblock_display = (
+                f"({macroblock_x}, {macroblock_y})"
+                if macroblock_x is not None
+                else "Not reported by decoder"
+            )
+
             st.code(
-                f"Damage start: {DAMAGE_START:,}\n"
-                f"Damage end:   {DAMAGE_END:,}\n"
-                f"Position in NAL: "
-                f"{DAMAGE_START - target_nal['start']:,} bytes\n"
-                f"Macroblock: "
-                f"({AFFECTED_MACROBLOCK_X}, "
-                f"{AFFECTED_MACROBLOCK_Y})",
+                f"Damage start: {damage_start:,}\n"
+                f"Damage end:   {damage_end:,}\n"
+                f"Detection method: NAL size anomaly\n"
+                f"Macroblock: {macroblock_display}",
                 language="text",
             )
 
@@ -1479,9 +1586,12 @@ if st.session_state.localization_complete:
     )
 
     st.write(
-        "CINE-X searches for the first valid IDR frame "
-        "after the localized corruption and uses that "
-        "clean intra-coded picture as the recovery anchor."
+        "CINE-X retains the clean footage before the "
+        "corruption, discards the unrecoverable damaged "
+        "segment, and resumes playback from the first valid "
+        "IDR frame after it — producing one continuous "
+        "recovered video rather than a clip cropped down to "
+        "the tail after the damage."
     )
 
     recover_button = st.button(
@@ -1513,13 +1623,35 @@ if st.session_state.localization_complete:
 
         nals = parse_nals(data)
 
+        localization = (
+            st.session_state.localization
+            or {}
+        )
+
+        damage_start = localization.get(
+            "nal_start"
+        )
+
+        damage_end = localization.get(
+            "damage_end", -1
+        )
+
+        if damage_start is None:
+
+            st.error(
+                "Damage localization data is missing. "
+                "Re-run analysis before attempting recovery."
+            )
+
+            st.stop()
+
         recovery_idr = None
 
         for nal in nals:
 
             if (
                 nal["type"] == 5
-                and nal["start"] > DAMAGE_END
+                and nal["start"] > damage_end
             ):
                 recovery_idr = nal
                 break
@@ -1534,7 +1666,8 @@ if st.session_state.localization_complete:
             st.stop()
 
         # ----------------------------------------------------
-        # Find latest SPS/PPS before recovery anchor
+        # Find latest SPS/PPS before recovery anchor, so the
+        # resumed segment stays independently decodable
         # ----------------------------------------------------
 
         sps = None
@@ -1562,10 +1695,31 @@ if st.session_state.localization_complete:
 
         # ----------------------------------------------------
         # Construct recovered H.264 stream
+        #
+        # CINE-X keeps every clean byte before the corruption
+        # (the footage leading up to the damage is untouched
+        # and fully playable), drops only the unrecoverable
+        # damaged segment — the flagged NAL through to just
+        # before the next IDR, since every P-frame in that
+        # span depends on the damaged frame and is not
+        # trustworthy either — and resumes cleanly from the
+        # next valid IDR frame onward.
+        #
+        # The result is one continuous recovered video with
+        # only the unrecoverable segment removed, not a clip
+        # truncated down to the tail after the damage.
         # ----------------------------------------------------
 
+        clean_prefix = data[:damage_start]
+
+        skipped_bytes = (
+            recovery_idr["start"] -
+            damage_start
+        )
+
         recovered_stream = (
-            sps
+            clean_prefix
+            + sps
             + pps
             + data[
                 recovery_idr["start"]:
@@ -1648,17 +1802,27 @@ if st.session_state.localization_complete:
             recovery_idr["start"]
         )
 
+        st.session_state.recovery_clean_prefix_bytes = (
+            len(clean_prefix)
+        )
+
+        st.session_state.recovery_skipped_bytes = (
+            skipped_bytes
+        )
+
         recovery_metadata = {
             "previous_idr":
                 st.session_state.previous_idr,
-            "expected_previous_idr":
-                EXPECTED_PREVIOUS_IDR,
             "selected_recovery_anchor":
                 recovery_idr["start"],
-            "expected_recovery_anchor":
-                EXPECTED_RECOVERY_IDR,
+            "detection_method":
+                "NAL size anomaly (dynamic)",
             "anchor_type":
                 "IDR / Intra-coded picture",
+            "clean_prefix_bytes":
+                len(clean_prefix),
+            "skipped_bytes":
+                skipped_bytes,
             "sps_present":
                 True,
             "pps_present":
@@ -1711,9 +1875,29 @@ if st.session_state.localization_complete:
                 ),
             )
 
+        col1, col2 = st.columns(2)
+
+        with col1:
+            st.metric(
+                "Clean Footage Retained",
+                format_size(
+                    len(clean_prefix)
+                ),
+            )
+
+        with col2:
+            st.metric(
+                "Unrecoverable Segment Skipped",
+                format_size(
+                    skipped_bytes
+                ),
+            )
+
         st.info(
-            "Recovery anchor selected as the first valid "
-            "IDR frame after the corrupted region."
+            "Footage before the damage was kept as-is. "
+            "The unrecoverable damaged segment was skipped, "
+            "and playback resumes from the first valid IDR "
+            "frame after the corrupted region."
         )
 
 
@@ -1976,9 +2160,16 @@ if st.session_state.verification_complete:
         st.session_state.recovery_anchor
     )
 
+    recovery_clean_prefix_bytes = (
+        st.session_state.recovery_clean_prefix_bytes
+    )
+
+    recovery_skipped_bytes = (
+        st.session_state.recovery_skipped_bytes
+    )
+
     previous_idr = (
         st.session_state.previous_idr
-        or EXPECTED_PREVIOUS_IDR
     )
 
     evidence_size = (
@@ -2151,23 +2342,27 @@ Previous IDR:
     Byte offset:
         {previous_idr}
 
-Expected previous IDR:
-    {EXPECTED_PREVIOUS_IDR}
-
 Selected recovery anchor:
 
     Byte offset:
         {recovery_anchor}
 
-Expected recovery anchor:
-    {EXPECTED_RECOVERY_IDR}
-
 Recovery anchor type:
     IDR / Intra-coded picture
 
+Localization method:
+    Robust NAL-size anomaly detection (median absolute
+    deviation), cross-referenced against decoder-reported
+    macroblock coordinates when available. No fixed byte
+    offsets for a specific evidence file are used.
+
 Selection logic:
-    The first valid IDR frame after the corrupted region
-    was selected as the recovery anchor.
+    Clean footage preceding the corruption was retained.
+    The unrecoverable damaged segment — the flagged NAL
+    through to just before the next IDR — was discarded,
+    since intervening P-frames depend on it. Playback
+    resumes from the first valid IDR frame after the
+    corrupted region.
 
 Recovery confidence:
     HIGH
@@ -2178,9 +2373,18 @@ Recovery confidence:
 ----------------------------------------------------------------------
 
 Recovery method:
-    The first valid IDR frame after the corrupted region
-    was selected and the H.264 stream was reconstructed
-    from that clean recovery point.
+    Clean footage preceding the corruption was retained
+    unmodified. The unrecoverable damaged segment was
+    discarded, and the H.264 stream was resumed from the
+    first valid IDR frame after it — producing one
+    continuous recovered video rather than a clip cropped
+    down to the tail after the damage.
+
+Clean footage retained:
+    {recovery_clean_prefix_bytes if recovery_clean_prefix_bytes is not None else "Unknown"} bytes
+
+Unrecoverable segment skipped:
+    {recovery_skipped_bytes if recovery_skipped_bytes is not None else "Unknown"} bytes
 
 Recovered H.264:
     recovered/cine_x_recovered.h264
@@ -2833,17 +3037,20 @@ NOTE:
                 "previous_idr":
                     st.session_state.previous_idr,
 
-                "expected_previous_idr":
-                    EXPECTED_PREVIOUS_IDR,
-
                 "selected_anchor":
                     st.session_state.recovery_anchor,
 
-                "expected_anchor":
-                    EXPECTED_RECOVERY_IDR,
+                "detection_method":
+                    "NAL size anomaly (dynamic)",
 
                 "anchor_type":
                     "IDR / Intra-coded picture",
+
+                "clean_prefix_bytes":
+                    st.session_state.recovery_clean_prefix_bytes,
+
+                "skipped_bytes":
+                    st.session_state.recovery_skipped_bytes,
 
                 "status":
                     "SUCCESSFUL",

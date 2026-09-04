@@ -1,12 +1,13 @@
 {
-    "previous_idr": 4012886,
-    "expected_previous_idr": 4012886,
+    "previous_idr": 734,
     "selected_recovery_anchor": 8157508,
-    "expected_recovery_anchor": 8157508,
+    "detection_method": "NAL size anomaly (dynamic)",
     "anchor_type": "IDR / Intra-coded picture",
+    "clean_prefix_bytes": 4012886,
+    "skipped_bytes": 4144622,
     "sps_present": true,
     "pps_present": true,
-    "recovered_h264_size": 5171516,
-    "recovered_mp4_size": 5173848,
+    "recovered_h264_size": 9184402,
+    "recovered_mp4_size": 9187803,
     "status": "SUCCESSFUL"
 }

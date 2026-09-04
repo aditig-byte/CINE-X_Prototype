@@ -2,10 +2,10 @@ CINE-X FORENSIC CASE RECORD
 ======================================================================
 
 Case ID:
-    CINE-X-20260902-131704
+    CINE-X-20260904-101730
 
 Generated:
-    2026-09-02 13:17:04
+    2026-09-04 10:17:30
 
 System:
     CINE-X
@@ -47,26 +47,26 @@ Corruption:
     DETECTED
 
 Damage Start:
-    6085197
+    4012886
 
 Damage End:
-    6085296
+    4348724
 
 Damaged Bytes:
-    100
+    335839
 
 Affected NAL:
-    367
+    256
 
 NAL Type:
-    1
+    5
 
 Affected Macroblock:
     X=91
     Y=40
 
 Previous IDR:
-    4012886
+    734
 
 Recovery Anchor:
     8157508

@@ -1,6 +1,6 @@
 {
-    "case_id": "CINE-X-20260902-131704",
-    "generated": "2026-09-02T13:17:04.197180",
+    "case_id": "CINE-X-20260904-101730",
+    "generated": "2026-09-04T10:17:30.413363",
     "system": "CINE-X",
     "system_description": "CCTV Forensic Recovery System",
     "evidence": {
@@ -20,39 +20,40 @@
     "corruption": {
         "detected": true,
         "decoder_messages": [
-            "[h264 @ 000001fa03a2dec0] Reference 6 >= 5",
-            "[h264 @ 000001fa03a2dec0] error while decoding MB 91 40, bytestream 6472",
-            "[h264 @ 000001fa03a2dec0] concealing 3318 DC, 3318 AC, 3318 MV errors in P frame",
-            "[vist#0:0/h264 @ 000001fa0181e300] [dec:h264 @ 000001fa03b2f500] corrupt decoded frame"
+            "[h264 @ 00000199b0c6bf00] Reference 6 >= 5",
+            "[h264 @ 00000199b0c6bf00] error while decoding MB 91 40, bytestream 6472",
+            "[h264 @ 00000199b0c6bf00] concealing 3318 DC, 3318 AC, 3318 MV errors in P frame",
+            "[vist#0:0/h264 @ 00000199af107f00] [dec:h264 @ 00000199b131f500] corrupt decoded frame"
         ]
     },
     "localization": {
-        "damage_start": 6085197,
-        "damage_end": 6085296,
-        "damaged_bytes": 100,
-        "nal_number": 367,
-        "nal_type": 1,
-        "nal_start": 6061687,
-        "nal_end": 6092388,
-        "nal_size": 30701,
+        "damage_start": 4012886,
+        "damage_end": 4348724,
+        "damaged_bytes": 335839,
+        "nal_number": 256,
+        "nal_type": 5,
+        "nal_start": 4012886,
+        "nal_end": 4348725,
+        "nal_size": 335839,
         "macroblock": {
             "x": 91,
             "y": 40
         }
     },
     "recovery": {
-        "previous_idr": 4012886,
-        "expected_previous_idr": 4012886,
+        "previous_idr": 734,
         "selected_anchor": 8157508,
-        "expected_anchor": 8157508,
+        "detection_method": "NAL size anomaly (dynamic)",
         "anchor_type": "IDR / Intra-coded picture",
+        "clean_prefix_bytes": 4012886,
+        "skipped_bytes": 4144622,
         "status": "SUCCESSFUL"
     },
     "verification": {
         "status": "PASSED",
         "resolution": "1920x1080",
         "fps": "25",
-        "duration": "00:00:13.56",
+        "duration": "00:00:23.56",
         "decoder_errors": 0
     },
     "files": {
