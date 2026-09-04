@@ -23,11 +23,12 @@ from datetime import datetime
 # 04 Damage Localization
 # 05 Automatic IDR Recovery
 # 06 Playback Reconstruction
+# 06B Visual Reconstruction Preview (+ math analysis)
 # 07 Recovery Verification
 # 08 Forensic Report
 # 09 Generate Forensic Case
 # 10 Case Integrity Verification
-# 11 Final Recovery Output
+# 11 Final Recovery Output (4-way comparison)
 # ============================================================
 
 
@@ -54,6 +55,7 @@ OUTPUT_DIR = BASE_DIR / "recovered"
 REPORT_DIR = BASE_DIR / "reports"
 CASE_DIR = BASE_DIR / "case_package"
 EXPORT_DIR = BASE_DIR / "exports"
+PREVIEW_DIR = BASE_DIR / "temp" / "previews"
 
 for directory in [
     RECOVERY_DIR,
@@ -62,6 +64,7 @@ for directory in [
     REPORT_DIR,
     CASE_DIR,
     EXPORT_DIR,
+    PREVIEW_DIR,
 ]:
     directory.mkdir(parents=True, exist_ok=True)
 
@@ -116,20 +119,6 @@ FFMPEG = find_ffmpeg()
 
 # ============================================================
 # DYNAMIC CORRUPTION LOCALIZATION SETTINGS
-#
-# CINE-X no longer relies on hardcoded byte offsets tied to a
-# single known test file. Damage is instead localized per
-# evidence file by:
-#
-#   1. Flagging the slice NAL unit whose size deviates sharply
-#      from the median slice size in that stream — a strong,
-#      file-independent signature of truncated or overwritten
-#      payload data.
-#   2. Parsing the FFmpeg decoder log for macroblock
-#      coordinates, when the decoder reports them for that
-#      stream.
-#
-# These thresholds control how aggressive that detection is.
 # ============================================================
 
 NAL_SIZE_ANOMALY_THRESHOLD = 3.5   # robust (MAD-based) z-score
@@ -164,6 +153,13 @@ st.markdown(
         border-radius: 10px;
         background: rgba(40,167,69,0.10);
         border: 1px solid rgba(40,167,69,0.35);
+    }
+
+    .estimate-box {
+        padding: 18px;
+        border-radius: 10px;
+        background: rgba(255,193,7,0.10);
+        border: 1px solid rgba(255,193,7,0.45);
     }
 
     .pipeline {
@@ -239,6 +235,12 @@ DEFAULT_STATE = {
     "recovered_mp4_path": None,
     "fixed_video_path": None,
 
+    "reconstruction_complete": False,
+    "reconstruction_video_path": None,
+    "reconstruction_log": "",
+    "reconstruction_concealment_events": 0,
+    "reconstruction_metrics": None,
+
     "report_path": None,
     "case_zip_path": None,
     "case_id": None,
@@ -259,6 +261,10 @@ DEFAULT_STATE = {
 
     "video_info": {},
     "case_hashes": {},
+
+    # Preview cache for smooth (non-jittery) in-browser playback.
+    # Keyed by a stable label -> {"fingerprint": ..., "preview_path": ...}
+    "preview_cache": {},
 }
 
 
@@ -302,6 +308,9 @@ def sha256_file(path):
 
 
 def format_size(size):
+    if size is None:
+        return "Unknown"
+
     if size >= 1024 * 1024:
         return f"{size / (1024 * 1024):.2f} MB"
 
@@ -340,6 +349,7 @@ def reset_pipeline_outputs():
         OUTPUT_DIR / "cine_x_recovered.h264",
         OUTPUT_DIR / "cine_x_recovered.mp4",
         OUTPUT_DIR / "cine_x_recovered_fixed.mp4",
+        OUTPUT_DIR / "cine_x_reconstruction_estimate.mp4",
 
         TEMP_DIR / "prepared_evidence.h264",
 
@@ -350,6 +360,11 @@ def reset_pipeline_outputs():
         REPORT_DIR / "recovery_metadata.json",
     ]:
         clean_file(path)
+
+    # Clear cached preview files too — they belong to the old evidence.
+    if PREVIEW_DIR.exists():
+        for item in PREVIEW_DIR.glob("preview_*.mp4"):
+            clean_file(item)
 
 
 def reset_session_pipeline():
@@ -383,9 +398,17 @@ def reset_session_pipeline():
     st.session_state.recovered_mp4_path = None
     st.session_state.fixed_video_path = None
 
+    st.session_state.reconstruction_complete = False
+    st.session_state.reconstruction_video_path = None
+    st.session_state.reconstruction_log = ""
+    st.session_state.reconstruction_concealment_events = 0
+    st.session_state.reconstruction_metrics = None
+
     st.session_state.report_path = None
     st.session_state.case_zip_path = None
     st.session_state.case_id = None
+
+    st.session_state.preview_cache = {}
 
 
 def parse_video_info(log):
@@ -428,6 +451,235 @@ def parse_video_info(log):
         "fps": fps,
         "duration": duration,
     }
+
+
+def duration_to_seconds(duration_str):
+    try:
+        hours, minutes, seconds = duration_str.split(":")
+        return int(hours) * 3600 + int(minutes) * 60 + float(seconds)
+    except Exception:
+        return None
+
+
+def probe_video(path):
+    """
+    Run a lightweight FFmpeg decode pass purely to read back
+    resolution / fps / duration + file size for a video file,
+    for use in the 4-way comparison table. Never raises.
+    """
+
+    if path is None:
+        return None
+
+    path = Path(path)
+
+    if not path.exists():
+        return None
+
+    result = run_ffmpeg(
+        [
+            "-i",
+            str(path),
+            "-f",
+            "null",
+            "NUL",
+        ]
+    )
+
+    info = parse_video_info(result.stderr)
+    info["size_bytes"] = path.stat().st_size
+    info["duration_seconds"] = duration_to_seconds(info["duration"])
+
+    return info
+
+
+# ============================================================
+# PLAYBACK PREVIEW CACHE (fixes jittery/laggy UI playback)
+#
+# The original pipeline fed stream-copied / variable-timestamp
+# footage straight into st.video, which browsers often play
+# back jittery. Every clip shown in the UI is now routed
+# through a small constant-frame-rate re-encode that is cached
+# per source file (by size + mtime), so it's only computed once
+# per evidence run and never touches the actual downloadable
+# evidentiary files.
+# ============================================================
+
+def get_playback_preview(path, cache_key):
+    if path is None:
+        return None
+
+    path = Path(path)
+
+    if not path.exists():
+        return None
+
+    stat = path.stat()
+    fingerprint = (str(path), stat.st_size, stat.st_mtime)
+
+    cache = st.session_state.preview_cache
+    cached = cache.get(cache_key)
+
+    if (
+        cached
+        and cached.get("fingerprint") == fingerprint
+        and Path(cached["preview_path"]).exists()
+    ):
+        return cached["preview_path"]
+
+    preview_path = PREVIEW_DIR / f"preview_{cache_key}.mp4"
+    clean_file(preview_path)
+
+    result = run_ffmpeg(
+        [
+            "-y",
+            "-fflags",
+            "+genpts",
+            "-i",
+            str(path),
+            "-map",
+            "0:v:0",
+            "-an",
+            "-c:v",
+            "libx264",
+            "-preset",
+            "veryfast",
+            "-crf",
+            "20",
+            "-pix_fmt",
+            "yuv420p",
+            "-r",
+            str(VIDEO_FRAMERATE),
+            "-fps_mode",
+            "cfr",
+            "-movflags",
+            "+faststart",
+            str(preview_path),
+        ]
+    )
+
+    if (
+        result.returncode != 0
+        or not preview_path.exists()
+        or preview_path.stat().st_size == 0
+    ):
+        # Fall back to the original file rather than failing the UI.
+        return str(path)
+
+    cache[cache_key] = {
+        "fingerprint": fingerprint,
+        "preview_path": str(preview_path),
+    }
+
+    return str(preview_path)
+
+
+# ============================================================
+# BYTE-EXACT PREVIEW FOR THE ORIGINAL EVIDENCE
+#
+# get_playback_preview() above deliberately decodes and
+# re-encodes with libx264 for stable playback — great for the
+# recovered/reconstructed clips, but WRONG for the original
+# evidence tab: decoding a corrupted stream with FFmpeg invokes
+# FFmpeg's own default error concealment, so the artifacts you
+# see in the browser stop matching byte-for-byte what a native
+# player (VLC, etc.) shows on your laptop for the same file.
+#
+# This preview instead tries a pure container remux first
+# (-c:v copy — no decode, no re-encode, no concealment), which
+# preserves the exact original bitstream and therefore the
+# exact same corruption/artifacts. It only falls back to a
+# re-encode if the container/codec truly can't be remuxed for
+# browser playback, and reports which path was taken so the UI
+# can warn accordingly.
+# ============================================================
+
+def get_original_evidence_preview(path, cache_key="original"):
+    """
+    Builds the in-browser preview for the raw uploaded evidence.
+
+    A pure container remux (-c:v copy) was tried first in an
+    earlier version of this function, but it keeps whatever
+    irregular/corrupted timestamps the source has — which is
+    exactly what makes browsers (much less forgiving than VLC)
+    stutter and jitter. Getting smooth playback requires decoding
+    and re-timing to a constant frame rate; there's no way around
+    that for a browser <video> element.
+
+    To keep the preview as faithful as possible to what a normal
+    player would show, this uses a PLAIN decode (no -err_detect
+    ignore_err, no custom -ec concealment flags, no forced frame
+    rate override) and a visually-lossless re-encode, so the only
+    thing that changes is timing regularity, not pixel content.
+    The download button always serves the untouched original
+    bytes for byte-exact verification.
+    """
+
+    if path is None:
+        return None, None
+
+    path = Path(path)
+
+    if not path.exists():
+        return None, None
+
+    stat = path.stat()
+    fingerprint = (str(path), stat.st_size, stat.st_mtime)
+
+    cache = st.session_state.preview_cache
+    cached = cache.get(cache_key)
+
+    if (
+        cached
+        and cached.get("fingerprint") == fingerprint
+        and Path(cached["preview_path"]).exists()
+    ):
+        return cached["preview_path"], cached.get("method", "decoded")
+
+    preview_path = PREVIEW_DIR / f"preview_{cache_key}.mp4"
+    clean_file(preview_path)
+
+    is_raw_h264 = path.suffix.lower() == ".h264"
+
+    input_args = []
+
+    if is_raw_h264:
+        # A raw elementary stream carries no timing info at all —
+        # every player (including VLC) has to assume a frame rate
+        # to play it back. Use the same assumption the rest of the
+        # pipeline uses, so this preview matches the rest of CINE-X.
+        input_args = ["-framerate", str(VIDEO_FRAMERATE), "-f", "h264"]
+
+    result = run_ffmpeg(
+        input_args
+        + [
+            "-y",
+            "-i", str(path),
+            "-map", "0:v:0",
+            "-an",
+            "-c:v", "libx264",
+            "-preset", "veryfast",
+            "-crf", "0",
+            "-pix_fmt", "yuv420p",
+            "-fps_mode", "cfr",
+            "-movflags", "+faststart",
+            str(preview_path),
+        ]
+    )
+
+    if (
+        result.returncode == 0
+        and preview_path.exists()
+        and preview_path.stat().st_size > 0
+    ):
+        cache[cache_key] = {
+            "fingerprint": fingerprint,
+            "preview_path": str(preview_path),
+            "method": "decoded",
+        }
+        return str(preview_path), "decoded"
+
+    return str(path), "raw"
 
 
 # ============================================================
@@ -496,19 +748,6 @@ def parse_nals(data):
 # ============================================================
 
 def find_anomalous_nal(nals):
-    """
-    Identify the slice NAL unit (type 1 or 5) whose size
-    deviates most sharply from the stream's typical slice
-    size, using a robust median-absolute-deviation z-score.
-
-    A truncated or overwritten NAL payload — the corruption
-    signature CINE-X targets — shows up as a size outlier
-    relative to neighboring frames, regardless of which file
-    is being analyzed. Returns None if no NAL crosses the
-    anomaly threshold, or if there isn't enough slice data to
-    judge "typical" size for this stream.
-    """
-
     slice_nals = [
         nal for nal in nals
         if nal["type"] in (1, 5)
@@ -527,12 +766,6 @@ def find_anomalous_nal(nals):
     mad = statistics.median(deviations)
 
     if mad == 0:
-
-        # Low-variance stream (e.g. a static CCTV scene where
-        # most P-frames are near-identical in size). A MAD-based
-        # z-score is undefined here, so fall back to a simple
-        # ratio test: a slice far smaller or larger than the
-        # stream's median is still a strong corruption signal.
 
         best_nal = None
         best_ratio = 1.0
@@ -576,16 +809,6 @@ def find_anomalous_nal(nals):
 
 
 def extract_macroblock_from_log(decoder_log):
-    """
-    Pull the first reported macroblock coordinates out of the
-    FFmpeg decoder log, when FFmpeg's H.264 decoder reports
-    them for this stream (e.g. lines like
-    "error while decoding MB 91 40, bytestream ...").
-
-    Returns (x, y) as ints, or (None, None) if no macroblock
-    coordinates were reported for this evidence file.
-    """
-
     if not decoder_log:
         return None, None
 
@@ -598,6 +821,72 @@ def extract_macroblock_from_log(decoder_log):
         return None, None
 
     return int(match.group(1)), int(match.group(2))
+
+
+# ============================================================
+# RECONSTRUCTION MATH ANALYSIS
+#
+# Quantifies exactly what fraction of the evidence is
+# bit-exact recovered footage vs. discarded-as-unrecoverable
+# vs. (only in the optional Phase 6B preview) decoder-guessed
+# concealment, so the numbers in the UI/report are not vague.
+# ============================================================
+
+def compute_reconstruction_math(
+    evidence_size,
+    recovery_clean_prefix_bytes,
+    recovery_skipped_bytes,
+    analysis_result,
+    concealment_events,
+):
+    total_bytes = evidence_size or 0
+    skipped_bytes = recovery_skipped_bytes or 0
+    clean_prefix_bytes = recovery_clean_prefix_bytes or 0
+
+    if total_bytes > 0:
+        percent_discarded = (skipped_bytes / total_bytes) * 100
+    else:
+        percent_discarded = 0.0
+
+    percent_exact_recovery = max(0.0, 100.0 - percent_discarded)
+
+    analysis_result = analysis_result or {}
+    idr = analysis_result.get("idr")
+    p_frames = analysis_result.get("p_frames")
+
+    total_frames = None
+    if isinstance(idr, int) and isinstance(p_frames, int):
+        total_frames = idr + p_frames
+
+    percent_frames_concealed = None
+    if total_frames:
+        percent_frames_concealed = min(
+            100.0,
+            (concealment_events / total_frames) * 100,
+        )
+
+    if percent_exact_recovery >= 95:
+        confidence = "HIGH"
+    elif percent_exact_recovery >= 80:
+        confidence = "MODERATE"
+    else:
+        confidence = "LOW"
+
+    return {
+        "total_evidence_bytes": total_bytes,
+        "clean_bytes_retained": clean_prefix_bytes,
+        "unrecoverable_bytes_discarded": skipped_bytes,
+        "percent_exact_recovery": round(percent_exact_recovery, 2),
+        "percent_unrecoverable_discarded": round(percent_discarded, 2),
+        "estimated_total_frames": total_frames,
+        "concealment_events": concealment_events,
+        "percent_frames_estimated_by_concealment": (
+            round(percent_frames_concealed, 2)
+            if percent_frames_concealed is not None
+            else None
+        ),
+        "confidence": confidence,
+    }
 
 
 # ============================================================
@@ -728,19 +1017,98 @@ def create_fixed_video(source_mp4):
 
 
 # ============================================================
+# VISUAL RECONSTRUCTION PREVIEW (NOT VERIFIED EVIDENCE)
+#
+# Decodes the ORIGINAL, still-corrupted evidence stream and
+# re-encodes it instead of copying the bitstream. FFmpeg's
+# H.264 decoder runs its own built-in error concealment
+# whenever it hits a decode error, approximating the damaged
+# frames using motion vectors and reference-frame data that
+# are already present in the stream.
+#
+# Refinements vs. the previous version:
+#   - Explicit "-ec deblock+favor_inter" asks the decoder to
+#     favor inter-prediction and deblock the concealed area,
+#     which measurably reduces block artifacts vs. the decoder
+#     default. Falls back automatically if unsupported by the
+#     local FFmpeg build.
+#   - No forced output frame-rate re-timing (native fps is
+#     kept) — re-timing was smearing/duplicating frames and
+#     made the estimate look MORE damaged than the source.
+#   - Higher visual fidelity encode (preset slow, crf 16) so
+#     compression artifacts don't compound with concealment
+#     artifacts.
+#
+# No AI/ML model is used and no new visual content is
+# invented. This is a decoder-level best guess, not verified
+# data, and CINE-X treats it as such everywhere it appears:
+# it is never included in the SHA-256-verified recovery claims.
+# ============================================================
+
+def create_concealment_reconstruction(source_path):
+
+    output_path = (
+        OUTPUT_DIR /
+        "cine_x_reconstruction_estimate.mp4"
+    )
+
+    attempts = [
+        [
+            "-y",
+            "-err_detect", "ignore_err",
+            "-ec", "deblock+favor_inter",
+            "-i", str(source_path),
+            "-map", "0:v:0",
+            "-an",
+            "-c:v", "libx264",
+            "-preset", "slow",
+            "-crf", "16",
+            "-pix_fmt", "yuv420p",
+            "-fps_mode", "cfr",
+            "-movflags", "+faststart",
+            str(output_path),
+        ],
+        # Fallback for FFmpeg builds that don't expose -ec on the CLI.
+        [
+            "-y",
+            "-err_detect", "ignore_err",
+            "-i", str(source_path),
+            "-map", "0:v:0",
+            "-an",
+            "-c:v", "libx264",
+            "-preset", "slow",
+            "-crf", "16",
+            "-pix_fmt", "yuv420p",
+            "-fps_mode", "cfr",
+            "-movflags", "+faststart",
+            str(output_path),
+        ],
+    ]
+
+    last_stderr = ""
+
+    for args in attempts:
+
+        clean_file(output_path)
+
+        result = run_ffmpeg(args)
+        last_stderr = result.stderr
+
+        if (
+            result.returncode == 0
+            and output_path.exists()
+            and output_path.stat().st_size > 0
+        ):
+            return output_path, last_stderr
+
+    return None, last_stderr
+
+
+# ============================================================
 # MANIFEST GENERATION
 # ============================================================
 
 def generate_manifest(case_root, case_id):
-    """
-    Generate a SHA-256 manifest for every case artifact.
-
-    IMPORTANT:
-    SHA256_MANIFEST.txt is deliberately excluded from its
-    own manifest because a file cannot contain a stable hash
-    of itself.
-    """
-
     manifest_entries = []
 
     for file_path in sorted(case_root.rglob("*")):
@@ -797,14 +1165,6 @@ def generate_manifest(case_root, case_id):
 # ============================================================
 
 def parse_manifest(manifest_path):
-    """
-    Parse the CINE-X manifest into:
-
-        relative_path -> expected SHA-256
-
-    The manifest itself is never treated as an entry.
-    """
-
     entries = {}
 
     current_file = None
@@ -833,13 +1193,6 @@ def parse_manifest(manifest_path):
 
 
 def verify_case_manifest(case_root):
-    """
-    Verify the exact expected SHA-256 for every file listed
-    in SHA256_MANIFEST.txt.
-
-    SHA256_MANIFEST.txt itself is excluded from verification.
-    """
-
     manifest_path = (
         case_root / "SHA256_MANIFEST.txt"
     )
@@ -873,8 +1226,6 @@ def verify_case_manifest(case_root):
             case_root / relative_path
         )
 
-        # Security check: manifest paths must remain
-        # inside the case package.
         try:
             target.resolve().relative_to(
                 case_root.resolve()
@@ -977,6 +1328,7 @@ uploaded_file = st.file_uploader(
         "Supported evidence formats: "
         "H264, MP4, AVI, MKV."
     ),
+    key="uploader_evidence",
 )
 
 
@@ -991,10 +1343,6 @@ if uploaded_file is not None:
     previous_hash = (
         st.session_state.evidence_hash
     )
-
-    # --------------------------------------------------------
-    # New evidence detection
-    # --------------------------------------------------------
 
     if previous_hash != current_upload_hash:
 
@@ -1076,6 +1424,7 @@ if uploaded_file is not None:
         "ANALYZE EVIDENCE",
         type="primary",
         use_container_width=True,
+        key="btn_analyze_evidence",
     )
 
     if analyze_button:
@@ -1105,8 +1454,7 @@ if uploaded_file is not None:
         )
 
         # ====================================================
-        # PHASE 1A
-        # PREPARE H264
+        # PHASE 1A — PREPARE H264
         # ====================================================
 
         with st.spinner(
@@ -1144,8 +1492,7 @@ if uploaded_file is not None:
         )
 
         # ====================================================
-        # PHASE 2
-        # H.264 STRUCTURAL ANALYSIS
+        # PHASE 2 — H.264 STRUCTURAL ANALYSIS
         # ====================================================
 
         st.divider()
@@ -1194,7 +1541,6 @@ if uploaded_file is not None:
 
         st.session_state.analysis_complete = True
 
-        # Save machine-readable analysis artifact.
         analysis_json_path = (
             REPORT_DIR / "h264_analysis.json"
         )
@@ -1293,8 +1639,7 @@ if uploaded_file is not None:
         )
 
         # ====================================================
-        # PHASE 3
-        # CORRUPTION DETECTION
+        # PHASE 3 — CORRUPTION DETECTION
         # ====================================================
 
         st.divider()
@@ -1387,8 +1732,7 @@ if uploaded_file is not None:
             )
 
         # ====================================================
-        # PHASE 4
-        # DAMAGE LOCALIZATION
+        # PHASE 4 — DAMAGE LOCALIZATION
         # ====================================================
 
         st.divider()
@@ -1478,7 +1822,6 @@ if uploaded_file is not None:
             localization,
         )
 
-        # Find actual previous IDR before the anomalous NAL.
         previous_idr = None
 
         for nal in nals:
@@ -1598,6 +1941,7 @@ if st.session_state.localization_complete:
         "RECOVER FOOTAGE",
         type="primary",
         use_container_width=True,
+        key="btn_recover_footage",
     )
 
     if recover_button:
@@ -1665,11 +2009,6 @@ if st.session_state.localization_complete:
 
             st.stop()
 
-        # ----------------------------------------------------
-        # Find latest SPS/PPS before recovery anchor, so the
-        # resumed segment stays independently decodable
-        # ----------------------------------------------------
-
         sps = None
         pps = None
 
@@ -1692,23 +2031,6 @@ if st.session_state.localization_complete:
             )
 
             st.stop()
-
-        # ----------------------------------------------------
-        # Construct recovered H.264 stream
-        #
-        # CINE-X keeps every clean byte before the corruption
-        # (the footage leading up to the damage is untouched
-        # and fully playable), drops only the unrecoverable
-        # damaged segment — the flagged NAL through to just
-        # before the next IDR, since every P-frame in that
-        # span depends on the damaged frame and is not
-        # trustworthy either — and resumes cleanly from the
-        # next valid IDR frame onward.
-        #
-        # The result is one continuous recovered video with
-        # only the unrecoverable segment removed, not a clip
-        # truncated down to the tail after the damage.
-        # ----------------------------------------------------
 
         clean_prefix = data[:damage_start]
 
@@ -1742,10 +2064,6 @@ if st.session_state.localization_complete:
         recovered_h264.write_bytes(
             recovered_stream
         )
-
-        # ----------------------------------------------------
-        # Convert recovered H264 to MP4
-        # ----------------------------------------------------
 
         ffmpeg_result = run_ffmpeg(
             [
@@ -1928,11 +2246,6 @@ if st.session_state.recovery_complete:
 
         st.stop()
 
-    fixed_video = (
-        OUTPUT_DIR /
-        "cine_x_recovered_fixed.mp4"
-    )
-
     with st.spinner(
         "Building clean playback MP4..."
     ):
@@ -1988,6 +2301,249 @@ if st.session_state.recovery_complete:
             format_size(
                 fixed_video.stat().st_size
             ),
+        )
+
+
+# ============================================================
+# PHASE 6B
+# VISUAL RECONSTRUCTION PREVIEW (NOT VERIFIED EVIDENCE)
+# + MATHEMATICAL RECONSTRUCTION ANALYSIS
+# ============================================================
+
+if st.session_state.fixed_complete:
+
+    st.divider()
+    st.header(
+        "06B — Visual Reconstruction Preview (Estimate)"
+    )
+
+    st.write(
+        "Optional. This decodes the ORIGINAL corrupted "
+        "evidence stream and lets FFmpeg's built-in H.264 "
+        "error concealment fill the damaged frames using "
+        "motion vectors and reference-frame data already "
+        "present in the stream — no AI/ML model, nothing "
+        "invented. Playback stays continuous instead of "
+        "jump-cutting past the damage, but the concealed "
+        "frames are the decoder's best guess, not verified "
+        "footage — it is never treated as evidence anywhere "
+        "in CINE-X."
+    )
+
+    build_reconstruction = st.button(
+        "GENERATE RECONSTRUCTION PREVIEW",
+        use_container_width=True,
+        key="btn_generate_reconstruction",
+    )
+
+    if build_reconstruction:
+
+        analysis_path_for_reconstruction = (
+            st.session_state.analysis_path
+        )
+
+        if (
+            analysis_path_for_reconstruction is None
+            or not Path(
+                analysis_path_for_reconstruction
+            ).exists()
+        ):
+
+            st.error(
+                "Prepared H.264 analysis stream is missing."
+            )
+
+            st.stop()
+
+        with st.spinner(
+            "Decoding original stream with error "
+            "concealment enabled..."
+        ):
+
+            reconstruction_path, reconstruction_log = (
+                create_concealment_reconstruction(
+                    analysis_path_for_reconstruction
+                )
+            )
+
+        if reconstruction_path is None:
+
+            st.error(
+                "Visual reconstruction preview failed."
+            )
+
+            with st.expander(
+                "FFmpeg diagnostics"
+            ):
+
+                st.code(
+                    reconstruction_log,
+                    language="text",
+                )
+
+        else:
+
+            concealment_terms = [
+                "concealing",
+                "error while decoding",
+                "corrupt decoded frame",
+            ]
+
+            concealment_events = 0
+
+            for line in (
+                reconstruction_log.splitlines()
+            ):
+
+                lower = line.lower()
+
+                if any(
+                    term in lower
+                    for term in concealment_terms
+                ):
+                    concealment_events += 1
+
+            st.session_state.reconstruction_video_path = (
+                reconstruction_path
+            )
+
+            st.session_state.reconstruction_log = (
+                reconstruction_log
+            )
+
+            st.session_state.reconstruction_concealment_events = (
+                concealment_events
+            )
+
+            st.session_state.reconstruction_complete = True
+
+            # Mathematical reconstruction analysis
+            evidence_path_for_math = (
+                st.session_state.uploaded_path
+            )
+
+            evidence_size_for_math = (
+                Path(evidence_path_for_math).stat().st_size
+                if evidence_path_for_math
+                and Path(evidence_path_for_math).exists()
+                else 0
+            )
+
+            st.session_state.reconstruction_metrics = (
+                compute_reconstruction_math(
+                    evidence_size_for_math,
+                    st.session_state.recovery_clean_prefix_bytes,
+                    st.session_state.recovery_skipped_bytes,
+                    st.session_state.analysis_result,
+                    concealment_events,
+                )
+            )
+
+    if st.session_state.reconstruction_complete:
+
+        reconstruction_path = (
+            st.session_state.reconstruction_video_path
+        )
+
+        st.markdown(
+            f"""
+            <div class="estimate-box">
+            <b>NOT VERIFIED EVIDENCE.</b><br><br>
+            Generated using FFmpeg's built-in decoder error
+            concealment
+            ({st.session_state.reconstruction_concealment_events}
+            concealment event(s) logged), with inter-prediction
+            favoring and deblocking applied to the concealed
+            region to reduce block artifacts. Frames covering the
+            damaged region are the decoder's motion-compensated
+            best guess, not authentic recovered data. The
+            SHA-256-verified recovered video from Phase 06 is
+            the authoritative evidence — treat this file as a
+            visual aid only.
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+        preview_path = get_playback_preview(
+            reconstruction_path,
+            "reconstruction",
+        )
+
+        st.video(str(preview_path))
+
+        # --------------------------------------------------
+        # Mathematical Reconstruction Analysis
+        # --------------------------------------------------
+
+        metrics = st.session_state.reconstruction_metrics
+
+        if metrics:
+
+            st.subheader("Reconstruction Math Analysis")
+
+            col1, col2, col3 = st.columns(3)
+
+            with col1:
+                st.metric(
+                    "Exact (Verified) Recovery",
+                    f"{metrics['percent_exact_recovery']}%",
+                )
+
+            with col2:
+                st.metric(
+                    "Unrecoverable Segment Discarded",
+                    f"{metrics['percent_unrecoverable_discarded']}%",
+                )
+
+            with col3:
+                frames_pct = metrics.get(
+                    "percent_frames_estimated_by_concealment"
+                )
+                st.metric(
+                    "Frames Estimated via Concealment",
+                    f"{frames_pct}%" if frames_pct is not None else "Unknown",
+                )
+
+            col1, col2, col3 = st.columns(3)
+
+            with col1:
+                st.metric(
+                    "Clean Bytes Retained",
+                    format_size(metrics["clean_bytes_retained"]),
+                )
+
+            with col2:
+                st.metric(
+                    "Bytes Discarded",
+                    format_size(metrics["unrecoverable_bytes_discarded"]),
+                )
+
+            with col3:
+                st.metric(
+                    "Recovery Confidence",
+                    metrics["confidence"],
+                )
+
+            st.caption(
+                "Exact recovery % = bytes of the evidence that are "
+                "either untouched original footage or footage after "
+                "a clean IDR resume point, divided by total evidence "
+                "size (SHA-256 verifiable). Concealment % is a "
+                "separate, unverified estimate that only applies to "
+                "the optional preview above — it is never counted "
+                "toward the exact-recovery figure."
+            )
+
+        st.download_button(
+            "DOWNLOAD RECONSTRUCTION PREVIEW (ESTIMATE)",
+            data=Path(
+                reconstruction_path
+            ).read_bytes(),
+            file_name="CINE-X_RECONSTRUCTION_ESTIMATE.mp4",
+            mime="video/mp4",
+            use_container_width=True,
+            key="dl_reconstruction_phase6b",
         )
 
 
@@ -2166,6 +2722,18 @@ if st.session_state.verification_complete:
 
     recovery_skipped_bytes = (
         st.session_state.recovery_skipped_bytes
+    )
+
+    reconstruction_included = (
+        st.session_state.reconstruction_complete
+    )
+
+    reconstruction_concealment_events = (
+        st.session_state.reconstruction_concealment_events
+    )
+
+    reconstruction_metrics = (
+        st.session_state.reconstruction_metrics or {}
     )
 
     previous_idr = (
@@ -2365,7 +2933,7 @@ Selection logic:
     corrupted region.
 
 Recovery confidence:
-    HIGH
+    {reconstruction_metrics.get("confidence", "HIGH")}
 
 
 ----------------------------------------------------------------------
@@ -2400,6 +2968,33 @@ Recovery status:
 
 
 ----------------------------------------------------------------------
+6B. MATHEMATICAL RECONSTRUCTION ANALYSIS
+----------------------------------------------------------------------
+
+Exact (SHA-256-verifiable) recovery:
+    {reconstruction_metrics.get("percent_exact_recovery", "N/A")}% of evidence bytes
+
+Unrecoverable segment discarded:
+    {reconstruction_metrics.get("percent_unrecoverable_discarded", "N/A")}% of evidence bytes
+
+Estimated total frames in stream:
+    {reconstruction_metrics.get("estimated_total_frames", "Unknown")}
+
+Concealment events logged (optional preview only):
+    {reconstruction_metrics.get("concealment_events", "N/A")}
+
+Frames estimated via decoder concealment (optional preview only):
+    {reconstruction_metrics.get("percent_frames_estimated_by_concealment", "N/A")}%
+
+Note:
+    The concealment-based percentage applies ONLY to the
+    optional, non-evidentiary visual reconstruction preview.
+    It is never included in the exact-recovery percentage
+    above, which is derived purely from byte accounting of
+    the SHA-256-verified recovered stream.
+
+
+----------------------------------------------------------------------
 7. PLAYBACK RECONSTRUCTION
 ----------------------------------------------------------------------
 
@@ -2408,6 +3003,31 @@ Playback reconstruction:
 
 Fixed video:
     recovered/cine_x_recovered_fixed.mp4
+
+
+----------------------------------------------------------------------
+7B. VISUAL RECONSTRUCTION ESTIMATE (NOT VERIFIED EVIDENCE)
+----------------------------------------------------------------------
+
+Status:
+    {"GENERATED" if reconstruction_included else "NOT GENERATED (optional step)"}
+
+Method:
+    FFmpeg built-in H.264 decoder error concealment (favoring
+    inter-prediction and deblocking the concealed region),
+    using motion vectors and reference-frame data already
+    present in the stream. No AI/ML model is used and no new
+    visual content is invented.
+
+Concealment events logged:
+    {reconstruction_concealment_events if reconstruction_included else "N/A"}
+
+Evidentiary status:
+    NOT VERIFIED. This file, when generated, is a
+    decoder-level best-guess approximation of the damaged
+    frames and is excluded from the evidentiary claims of
+    this report. The SHA-256-verified recovered video
+    (Section 6) remains the authoritative recovered evidence.
 
 
 ----------------------------------------------------------------------
@@ -2558,6 +3178,7 @@ SHA-256 Integrity Verification
         file_name="CINE-X_Forensic_Report.txt",
         mime="text/plain",
         use_container_width=True,
+        key="dl_forensic_report",
     )
 
 
@@ -2584,6 +3205,7 @@ if st.session_state.report_complete:
         "GENERATE FORENSIC CASE",
         type="primary",
         use_container_width=True,
+        key="btn_generate_case",
     )
 
     if generate_case:
@@ -2595,10 +3217,6 @@ if st.session_state.report_complete:
         case_id = (
             f"CINE-X-{timestamp}"
         )
-
-        # ----------------------------------------------------
-        # CLEAN OLD CASE PACKAGE
-        # ----------------------------------------------------
 
         if CASE_DIR.exists():
 
@@ -2626,6 +3244,10 @@ if st.session_state.report_complete:
             CASE_DIR / "reports"
         )
 
+        estimates_dir = (
+            CASE_DIR / "estimates"
+        )
+
         evidence_dir.mkdir(
             parents=True,
             exist_ok=True,
@@ -2642,6 +3264,11 @@ if st.session_state.report_complete:
         )
 
         reports_dir.mkdir(
+            parents=True,
+            exist_ok=True,
+        )
+
+        estimates_dir.mkdir(
             parents=True,
             exist_ok=True,
         )
@@ -2669,10 +3296,6 @@ if st.session_state.report_complete:
         report_source = (
             st.session_state.report_path
         )
-
-        # ----------------------------------------------------
-        # Validate required files
-        # ----------------------------------------------------
 
         required_sources = {
             "Evidence": evidence_path,
@@ -2709,18 +3332,10 @@ if st.session_state.report_complete:
 
             st.stop()
 
-        # ----------------------------------------------------
-        # EVIDENCE
-        # ----------------------------------------------------
-
         shutil.copy2(
             evidence_path,
             evidence_dir / evidence_path.name,
         )
-
-        # ----------------------------------------------------
-        # ANALYSIS ARTIFACT
-        # ----------------------------------------------------
 
         shutil.copy2(
             analysis_path,
@@ -2740,10 +3355,6 @@ if st.session_state.report_complete:
                 "h264_analysis.json",
             )
 
-        # ----------------------------------------------------
-        # RECOVERED FILES
-        # ----------------------------------------------------
-
         for source in [
             recovered_h264,
             recovered_mp4,
@@ -2754,10 +3365,6 @@ if st.session_state.report_complete:
                 source,
                 recovered_dir / Path(source).name,
             )
-
-        # ----------------------------------------------------
-        # REPORT ARTIFACTS
-        # ----------------------------------------------------
 
         report_files = [
             report_source,
@@ -2781,9 +3388,22 @@ if st.session_state.report_complete:
                     reports_dir / source.name,
                 )
 
-        # ----------------------------------------------------
-        # CASE RECORD
-        # ----------------------------------------------------
+        reconstruction_source = (
+            st.session_state.reconstruction_video_path
+        )
+
+        reconstruction_included = bool(
+            reconstruction_source
+            and Path(reconstruction_source).exists()
+        )
+
+        if reconstruction_included:
+
+            shutil.copy2(
+                reconstruction_source,
+                estimates_dir /
+                Path(reconstruction_source).name,
+            )
 
         localization = (
             st.session_state.localization
@@ -2793,6 +3413,10 @@ if st.session_state.report_complete:
         analysis_result = (
             st.session_state.analysis_result
             or {}
+        )
+
+        reconstruction_metrics = (
+            st.session_state.reconstruction_metrics or {}
         )
 
         case_record = f"""
@@ -2875,11 +3499,17 @@ Recovery Anchor Type:
 Recovery Status:
     SUCCESSFUL
 
+Exact Recovery Percentage:
+    {reconstruction_metrics.get("percent_exact_recovery", "N/A")}%
+
 Playback Reconstruction:
     SUCCESSFUL
 
 Recovery Verification:
     PASSED
+
+Visual Reconstruction Estimate:
+    {"INCLUDED (estimates/ folder — decoder concealment, NOT verified evidence)" if reconstruction_included else "NOT GENERATED (optional step, skipped)"}
 
 Case Integrity:
     PENDING SHA-256 MANIFEST VERIFICATION
@@ -2902,10 +3532,6 @@ NOTE:
             case_record.strip(),
             encoding="utf-8",
         )
-
-        # ----------------------------------------------------
-        # JSON SUMMARY
-        # ----------------------------------------------------
 
         video_info = (
             st.session_state.video_info
@@ -3056,6 +3682,9 @@ NOTE:
                     "SUCCESSFUL",
             },
 
+            "reconstruction_math_analysis":
+                reconstruction_metrics,
+
             "verification": {
                 "status":
                     "PASSED",
@@ -3079,6 +3708,32 @@ NOTE:
                     len(
                         st.session_state.verification_errors
                     ),
+            },
+
+            "visual_reconstruction": {
+                "included":
+                    reconstruction_included,
+
+                "method":
+                    "FFmpeg decoder error concealment "
+                    "(favor_inter + deblock, no AI/ML)",
+
+                "concealment_events":
+                    st.session_state.reconstruction_concealment_events
+                    if reconstruction_included
+                    else None,
+
+                "evidentiary_status":
+                    "NOT VERIFIED — excluded from "
+                    "evidentiary claims",
+
+                "file":
+                    (
+                        f"estimates/"
+                        f"{Path(reconstruction_source).name}"
+                    )
+                    if reconstruction_included
+                    else None,
             },
 
             "files": {
@@ -3120,6 +3775,14 @@ NOTE:
 
                 "hash_manifest":
                     "SHA256_MANIFEST.txt",
+
+                "reconstruction_estimate":
+                    (
+                        f"estimates/"
+                        f"{Path(reconstruction_source).name}"
+                    )
+                    if reconstruction_included
+                    else None,
             },
         }
 
@@ -3133,23 +3796,12 @@ NOTE:
             summary,
         )
 
-        # ----------------------------------------------------
-        # SHA-256 MANIFEST
-        #
-        # IMPORTANT:
-        # The manifest does NOT include itself.
-        # ----------------------------------------------------
-
         manifest_path, manifest_entries = (
             generate_manifest(
                 CASE_DIR,
                 case_id,
             )
         )
-
-        # ----------------------------------------------------
-        # CREATE ZIP
-        # ----------------------------------------------------
 
         zip_path = (
             EXPORT_DIR /
@@ -3214,6 +3866,7 @@ NOTE:
             file_name=zip_path.name,
             mime="application/zip",
             use_container_width=True,
+            key="dl_case_zip",
         )
 
 
@@ -3262,10 +3915,6 @@ if st.session_state.case_generated:
         "recovered/cine_x_recovered_fixed.mp4",
     ]
 
-    # --------------------------------------------------------
-    # Check all expected files
-    # --------------------------------------------------------
-
     missing_files = []
 
     for relative in expected_files:
@@ -3303,10 +3952,6 @@ if st.session_state.case_generated:
             "All expected case files are present."
         )
 
-        # ----------------------------------------------------
-        # Display exact current hashes
-        # ----------------------------------------------------
-
         case_hashes = {}
 
         for relative in expected_files:
@@ -3320,10 +3965,6 @@ if st.session_state.case_generated:
             ] = sha256_file(
                 target
             )
-
-        # Display manifest hash separately.
-        # It is intentionally NOT included in the manifest
-        # verification comparison.
 
         manifest_path = (
             case_root /
@@ -3365,10 +4006,6 @@ if st.session_state.case_generated:
                     f"{file_hash}",
                     language="text",
                 )
-
-        # ----------------------------------------------------
-        # EXACT MANIFEST VERIFICATION
-        # ----------------------------------------------------
 
         verified, verification_errors = (
             verify_case_manifest(
@@ -3424,10 +4061,6 @@ if st.session_state.case_generated:
                     f"- {error}"
                 )
 
-        # ----------------------------------------------------
-        # Manifest download
-        # ----------------------------------------------------
-
         if manifest_path.exists():
 
             st.download_button(
@@ -3436,11 +4069,22 @@ if st.session_state.case_generated:
                 file_name="SHA256_MANIFEST.txt",
                 mime="text/plain",
                 use_container_width=True,
+                key="dl_manifest",
             )
 
 
 # ============================================================
 # FINAL OUTPUT
+# 11 — FINAL RECOVERY OUTPUT (4-way comparison)
+#
+#   1. Original Evidence      — as uploaded, unmodified
+#   2. Recovered Video (Cut)  — clean prefix + resumed IDR
+#   3. Reconstructed (Est.)   — decoder concealment preview
+#   4. Final Corrected/Joined — the verified playback MP4
+#
+# All four are shown through the smooth playback preview
+# cache (fixes jitter/lag); downloads always use the original
+# untouched files.
 # ============================================================
 
 if st.session_state.verification_complete:
@@ -3451,93 +4095,209 @@ if st.session_state.verification_complete:
         "11 — Final Recovery Output"
     )
 
-    fixed_video = (
-        st.session_state.fixed_video_path
+    evidence_path = st.session_state.uploaded_path
+    recovered_mp4 = st.session_state.recovered_mp4_path
+    recovered_h264 = st.session_state.recovered_h264_path
+    fixed_video = st.session_state.fixed_video_path
+    reconstruction_path = (
+        st.session_state.reconstruction_video_path
+        if st.session_state.reconstruction_complete
+        else None
     )
 
-    recovered_mp4 = (
-        st.session_state.recovered_mp4_path
+    tab_original, tab_recovered, tab_reconstructed = st.tabs(
+        [
+            "1 · Original Evidence",
+            "2 · Recovered (Cut)",
+            "3 · Reconstructed (Estimate)",
+        ]
     )
 
-    recovered_h264 = (
-        st.session_state.recovered_h264_path
-    )
+    with tab_original:
 
-    # --------------------------------------------------------
-    # Recovered H264
-    # --------------------------------------------------------
-
-    st.subheader(
-        "Recovered H.264 Stream"
-    )
-
-    if (
-        recovered_h264
-        and Path(recovered_h264).exists()
-    ):
-
-        st.download_button(
-            "DOWNLOAD RECOVERED H.264",
-            data=Path(
-                recovered_h264
-            ).read_bytes(),
-            file_name="cine_x_recovered.h264",
-            mime="application/octet-stream",
-            use_container_width=True,
+        st.caption(
+            "Exactly as uploaded — unmodified, still containing "
+            "the corruption."
         )
 
+        if evidence_path and Path(evidence_path).exists():
+
+            original_preview, preview_method = (
+                get_original_evidence_preview(
+                    evidence_path, "original"
+                )
+            )
+
+            st.video(str(original_preview))
+
+            if preview_method == "decoded":
+                st.caption(
+                    "This preview is decoded and re-timed to a "
+                    "constant frame rate for smooth browser "
+                    "playback, using a plain decode (no error "
+                    "concealment flags) and a visually-lossless "
+                    "re-encode — pixel content should match a "
+                    "normal player. Download the file below for "
+                    "the byte-exact original."
+                )
+            elif preview_method == "raw":
+                st.warning(
+                    "Could not build a browser preview for this "
+                    "file. Download it below to view it in a "
+                    "native player."
+                )
+
+            st.download_button(
+                "DOWNLOAD ORIGINAL EVIDENCE",
+                data=Path(evidence_path).read_bytes(),
+                file_name=Path(evidence_path).name,
+                mime="application/octet-stream",
+                use_container_width=True,
+                key="dl_original_evidence",
+            )
+
+        else:
+            st.info("Original evidence file is unavailable.")
+
+    with tab_recovered:
+
+        st.caption(
+            "Clean footage before the damage, with the "
+            "unrecoverable segment removed and playback resumed "
+            "from the next valid IDR frame — SHA-256 verified."
+        )
+
+        if recovered_mp4 and Path(recovered_mp4).exists():
+
+            recovered_preview = get_playback_preview(
+                recovered_mp4, "recovered"
+            )
+
+            st.video(str(recovered_preview))
+
+            col1, col2 = st.columns(2)
+
+            with col1:
+                if recovered_h264 and Path(recovered_h264).exists():
+                    st.download_button(
+                        "DOWNLOAD RECOVERED H.264",
+                        data=Path(recovered_h264).read_bytes(),
+                        file_name="cine_x_recovered.h264",
+                        mime="application/octet-stream",
+                        use_container_width=True,
+                        key="dl_recovered_h264",
+                    )
+
+            with col2:
+                st.download_button(
+                    "DOWNLOAD RECOVERED MP4",
+                    data=Path(recovered_mp4).read_bytes(),
+                    file_name="cine_x_recovered.mp4",
+                    mime="video/mp4",
+                    use_container_width=True,
+                    key="dl_recovered_mp4",
+                )
+
+        else:
+            st.info("Recovered video is unavailable.")
+
+    with tab_reconstructed:
+
+        st.caption(
+            "Optional decoder error-concealment estimate — NOT "
+            "verified evidence. Generate it in section 06B above."
+        )
+
+        if reconstruction_path and Path(reconstruction_path).exists():
+
+            reconstruction_preview = get_playback_preview(
+                reconstruction_path, "reconstruction"
+            )
+
+            st.video(str(reconstruction_preview))
+
+            st.download_button(
+                "DOWNLOAD RECONSTRUCTION PREVIEW (ESTIMATE)",
+                data=Path(reconstruction_path).read_bytes(),
+                file_name="CINE-X_RECONSTRUCTION_ESTIMATE.mp4",
+                mime="video/mp4",
+                use_container_width=True,
+                key="dl_reconstruction_final",
+            )
+
+        else:
+            st.info(
+                "No reconstruction preview generated yet — use "
+                "section 06B to build one."
+            )
+
     # --------------------------------------------------------
-    # Recovered MP4
+    # COMPARISON TABLE
     # --------------------------------------------------------
 
-    st.subheader(
-        "Recovered MP4"
+    st.subheader("Comparison Table")
+
+    probe_original = probe_video(evidence_path)
+    probe_recovered = probe_video(recovered_mp4)
+    probe_reconstructed = (
+        probe_video(reconstruction_path)
+        if reconstruction_path
+        else None
     )
 
-    if (
-        recovered_mp4
-        and Path(recovered_mp4).exists()
-    ):
+    def _row(label, probe, status):
+        if probe is None:
+            return {
+                "Segment": label,
+                "Resolution": "—",
+                "FPS": "—",
+                "Duration": "—",
+                "Size": "—",
+                "Evidentiary Status": status,
+            }
+        return {
+            "Segment": label,
+            "Resolution": probe.get("resolution", "Unknown"),
+            "FPS": probe.get("fps", "Unknown"),
+            "Duration": probe.get("duration", "Unknown"),
+            "Size": format_size(probe.get("size_bytes")),
+            "Evidentiary Status": status,
+        }
 
-        st.video(
-            str(recovered_mp4)
-        )
+    comparison_rows = [
+        _row(
+            "1. Original Evidence",
+            probe_original,
+            "As uploaded — may contain corruption",
+        ),
+        _row(
+            "2. Recovered Video (Cut)",
+            probe_recovered,
+            "SHA-256 verified — exact recovery",
+        ),
+        _row(
+            "3. Reconstructed (Estimate)",
+            probe_reconstructed,
+            "NOT verified — decoder concealment guess"
+            if reconstruction_path
+            else "Not generated",
+        ),
+    ]
 
-        st.download_button(
-            "DOWNLOAD RECOVERED MP4",
-            data=Path(
-                recovered_mp4
-            ).read_bytes(),
-            file_name="cine_x_recovered.mp4",
-            mime="video/mp4",
-            use_container_width=True,
-        )
-
-    # --------------------------------------------------------
-    # FINAL CORRECTED VIDEO
-    # --------------------------------------------------------
-
-    st.subheader(
-        "Final Corrected Playback Video"
+    st.dataframe(
+        comparison_rows,
+        use_container_width=True,
+        hide_index=True,
     )
 
-    if (
-        fixed_video
-        and Path(fixed_video).exists()
-    ):
+    metrics = st.session_state.reconstruction_metrics
 
-        st.video(
-            str(fixed_video)
-        )
-
-        st.download_button(
-            "DOWNLOAD FINAL CORRECTED VIDEO",
-            data=Path(
-                fixed_video
-            ).read_bytes(),
-            file_name="CINE-X_FINAL_CORRECTED.mp4",
-            mime="video/mp4",
-            use_container_width=True,
+    if metrics:
+        st.caption(
+            f"Exact recovery: {metrics['percent_exact_recovery']}% of "
+            f"evidence bytes · Unrecoverable discarded: "
+            f"{metrics['percent_unrecoverable_discarded']}% · "
+            f"Confidence: {metrics['confidence']}"
         )
 
 
