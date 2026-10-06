@@ -21,7 +21,6 @@ Built for **SIH26150** — *Development of a Multi-Vendor DVR/NVR Forensic Analy
 - [Forensic Integrity Model](#forensic-integrity-model)
 - [Known Limitations](#known-limitations)
 - [Roadmap](#roadmap)
-- [License](#license)
 
 ---
 
